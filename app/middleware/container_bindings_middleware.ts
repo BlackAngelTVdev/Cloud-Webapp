@@ -21,7 +21,7 @@ export default class ContainerBindingsMiddleware {
 
     try {
       const response = await fetch(
-        'https://github.com/Gianmarco-Ruberti/Cloud-Webapp/releases/latest'
+        'https://api.github.com/repos/Gianmarco-Ruberti/Cloud-Webapp/releases/latest'
       )
       if (!response.ok) {
         // If GitHub API fails, try reading local package.json for a version
