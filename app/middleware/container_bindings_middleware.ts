@@ -21,7 +21,7 @@ export default class ContainerBindingsMiddleware {
 
     try {
       const response = await fetch(
-        'https://api.github.com/repos/BlackAngelTVdev/Je-donne-ou-je-prete/releases/latest'
+        'https://github.com/Gianmarco-Ruberti/Cloud-Webapp/releases/latest'
       )
       if (!response.ok) {
         // If GitHub API fails, try reading local package.json for a version
