@@ -18,7 +18,7 @@
       "email": "albertbraimi@gmail.com"
     }
   ],
-"scripts": {
+  "scripts": {
     "start": "node bin/server.js",
     "build": "node ace build",
     "build-img-l": "mkdir -p build/public/uploads/items && mkdir -p ./items_backup && cp -r build/public/uploads/items/. ./items_backup/ && node ace build && mkdir -p build/public/uploads/items && cp -r ./items_backup/. build/public/uploads/items/ && rm -rf ./items_backup",
@@ -81,12 +81,12 @@
     "@adonisjs/shield": "^8.2.0",
     "@adonisjs/static": "^1.1.1",
     "@adonisjs/vite": "^4.0.0",
+    "@azure/msal-node": "^7.2.3",
     "@vinejs/vine": "^3.0.1",
     "auth": "^1.0.2",
     "better-sqlite3": "^12.10.0",
     "bootstrap": "^5.3.8",
     "edge.js": "^6.2.1",
-    "edu-sso-bridge": "^1.0.4",
     "luxon": "^3.7.2",
     "mysql2": "^3.15.3",
     "reflect-metadata": "^0.2.2",

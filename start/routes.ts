@@ -10,7 +10,7 @@ import { middleware } from './kernel.js'
 import AuthController from '#controllers/auth_controller'
 import AccountsController from '#controllers/accounts_controller'
 import ChercheObjectsController from '#controllers/cherche_objects_controller'
-import SsoTestController from '#controllers/sso_test_controller'
+import MicrosoftAuthController from '#controllers/microsoft_auth_controller'
 import AdminController from '#controllers/admin_controller'
 import ContactsController from '#controllers/contacts_controller'
 
@@ -18,10 +18,10 @@ import ContactsController from '#controllers/contacts_controller'
 router.get('/choix-login', [AuthController, 'choixLogin']).as('choix_login')
 router.get('/login', [AuthController, 'login']).as('login')
 router.post('/login', [AuthController, 'authenticate']).as('autenticate')
-router.get('/sso/test', [SsoTestController, 'status']).as('sso.test.status')
-router.get('/sso/login', [SsoTestController, 'loginRedirect']).as('sso.test.login')
-router.get('/sso/callback', [SsoTestController, 'callback']).as('sso.test.callback')
-router.get('/sso/logout', [SsoTestController, 'logout']).as('sso.test.logout')
+// --- Microsoft Entra ID (MSAL) ---
+router.get('/auth/microsoft/login', [MicrosoftAuthController, 'redirect']).as('microsoft.login')
+router.get('/auth/microsoft/callback', [MicrosoftAuthController, 'callback']).as('microsoft.callback')
+router.get('/auth/microsoft/logout', [MicrosoftAuthController, 'logout']).as('microsoft.logout')
 
 // --- Protected routes ---
 router

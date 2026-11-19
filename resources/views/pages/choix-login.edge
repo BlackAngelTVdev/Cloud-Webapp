@@ -18,7 +18,7 @@
     @include('partials/flash')
     <form method="get">
       <img src="{{ asset('resources/img/logo.png') }}" alt="{{ t('messages.site.logo_alt') }}" />
-      <button class="btn btn-outline-info mt-2 edu" formaction="{{ route('sso.test.login') }}" type="submit">
+      <button class="btn btn-outline-info mt-2 edu" formaction="{{ route('microsoft.login') }}" type="submit">
         <img src="https://account.microsoft.com/favicon.ico" alt="{{ t('messages.auth.edu_vaud') }}" />
         <span>{{ t('messages.auth.edu_vaud') }}</span>
       </button>

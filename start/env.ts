@@ -94,10 +94,14 @@ export default await Env.create(new URL('../', import.meta.url), {
 
   /*
   |----------------------------------------------------------
-  | Variables for configuring SSO bridge
+  | Variables for configuring Microsoft Entra ID (MSAL)
   |----------------------------------------------------------
   */
-  API_KEY: Env.schema.string.optional(),
-  SSO_PORTAL: Env.schema.string.optional(),
+  AZURE_CLIENT_ID: Env.schema.string.optional(),
+  AZURE_CLIENT_SECRET: Env.schema.string.optional(),
+  AZURE_TENANT_ID: Env.schema.string.optional(),
+  AZURE_REDIRECT_URI: Env.schema.string.optional(),
+  AZURE_POST_LOGOUT_REDIRECT_URI: Env.schema.string.optional(),
+
   OBJECTS_HARD_DELETE_AFTER_DAYS: Env.schema.string.optional(),
 })
