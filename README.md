@@ -4,3 +4,5 @@
 solution : j'ai mis la notif
 **Automatisation du stop** : le champ de l'heure de start est pas valide mais valide
 solution : changer la TimeZone de UTC vers W. Europe Standard Time (solution trouvé par le professeurs)
+
+**npm i** : la vm ne voulais pas du coup j'ai pas installer comme ca mais avec npm ci --omit=dev
