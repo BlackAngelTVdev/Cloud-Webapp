@@ -26,49 +26,72 @@ jobs:
     steps:
       - name: Extraire les identifiants Kudu du profil de publication
         env:
-          PROFILE_B64: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_02B4A6BDB148467D881A410EF039991D }}
+          PROFILE: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_02B4A6BDB148467D881A410EF039991D }}
         run: |
-          set -euo pipefail
-          if [ -z "${PROFILE_B64:-}" ]; then
-            echo "::error::Le secret du profil de publication est absent."
+          set -uo pipefail
+          WORK="$RUNNER_TEMP"
+          if [ -z "${PROFILE:-}" ]; then
+            echo "::error::Le secret du profil de publication est vide."
             exit 1
           fi
-          printf '%s' "$PROFILE_B64" | base64 -d > "$RUNNER_TEMP/profile.xml"
-          python3 - "$RUNNER_TEMP" <<'PY'
+
+          # Azure stocke le profil encodé en base64, mais on accepte aussi
+          # le XML brut pour être robuste.
+          printf '%s' "$PROFILE" | base64 -d > "$WORK/profile.xml" 2>/dev/null || true
+          if ! grep -q '<publishData' "$WORK/profile.xml" 2>/dev/null; then
+            printf '%s' "$PROFILE" > "$WORK/profile.xml"
+          fi
+
+          echo "racine XML détectée : $(grep -o '<publishData' "$WORK/profile.xml" | head -1 || echo 'aucune')"
+          echo "profils : $(grep -c '<publishProfile' "$WORK/profile.xml" || true)"
+          grep -o 'publishMethod="[^"]*"' "$WORK/profile.xml" | sort -u || true
+
+          python3 - "$WORK" <<'PY'
           import re, sys, pathlib
 
           tmp = pathlib.Path(sys.argv[1])
-          xml = (tmp / 'profile.xml').read_text(encoding='utf-8-sig')
+          xml = (tmp / 'profile.xml').read_text(encoding='utf-8-sig', errors='replace')
           user = re.search(r'userName="([^"]+)"', xml)
           password = re.search(r'userPWD="([^"]+)"', xml)
+          print('userName trouvé :', bool(user), '| userPWD trouvé :', bool(password))
           if not user or not password:
-              raise SystemExit('userName/userPWD introuvables dans le profil')
-
+              raise SystemExit(1)
           (tmp / 'kudu_user').write_text(user.group(1))
           (tmp / 'kudu_pass').write_text(password.group(1))
-          print("identifiants Kudu extraits")
           PY
-          echo "::add-mask::$(cat "$RUNNER_TEMP/kudu_pass")"
-          chmod 600 "$RUNNER_TEMP/kudu_user" "$RUNNER_TEMP/kudu_pass"
+          status=$?
+          echo "extraction status=$status"
+
+          if [ -s "$WORK/kudu_pass" ]; then
+            echo "::add-mask::$(cat "$WORK/kudu_pass")"
+            chmod 600 "$WORK/kudu_user" "$WORK/kudu_pass"
+            echo "identifiants Kudu prêts"
+          else
+            echo "::warning::Identifiants Kudu non extraits, les appels suivants vont échouer en 401."
+          fi
+          exit 0
 
       - name: Logs du conteneur
         run: |
           set -uo pipefail
           BASE="https://jdjp-dtbmafa8exava5aj.scm.switzerlandnorth-01.azurewebsites.net"
-          AUTH="$(cat "$RUNNER_TEMP/kudu_user"):$(cat "$RUNNER_TEMP/kudu_pass")"
+          AUTH="$(cat "$RUNNER_TEMP/kudu_user" 2>/dev/null || echo nav):$(cat "$RUNNER_TEMP/kudu_pass" 2>/dev/null || echo nav)"
 
           echo "===== /api/logs/docker ====="
-          curl -sS -u "$AUTH" --max-time 45 "$BASE/api/logs/docker?tail=200" | tail -n 200 || true
+          curl -sS -u "$AUTH" --max-time 45 "$BASE/api/logs/docker?isStreaming=false&tail=200" | tail -n 200 || true
           echo
           echo "===== /api/logs/current ====="
           curl -sS -u "$AUTH" --max-time 30 "$BASE/api/logs/current?tail=120" | tail -n 120 || true
+          echo
+          echo "===== /api/deployments/latest ====="
+          curl -sS -u "$AUTH" --max-time 30 "$BASE/api/deployments/latest" | head -c 2000 || true
           echo
 
       - name: Variables d'application (valeurs sensibles masquées)
         run: |
           set -uo pipefail
           BASE="https://jdjp-dtbmafa8exava5aj.switzerlandnorth-01.azurewebsites.net"
-          AUTH="$(cat "$RUNNER_TEMP/kudu_user"):$(cat "$RUNNER_TEMP/kudu_pass")"
+          AUTH="$(cat "$RUNNER_TEMP/kudu_user" 2>/dev/null || echo nav):$(cat "$RUNNER_TEMP/kudu_pass" 2>/dev/null || echo nav)"
 
           curl -sS -u "$AUTH" -H 'Content-Type: application/json' -X POST \
             --max-time 30 -d '{}' "$BASE/api/appsettings/list" > "$RUNNER_TEMP/appsettings.json" || true
@@ -81,14 +104,15 @@ jobs:
               'SCM_DO_BUILD_DURING_DEPLOYMENT', 'WEBSITE_NODE_DEFAULT_VERSION',
               'WEBSITES_ENABLE_APP_SERVICE_STORAGE', 'WEBSITE_RUN_FROM_PACKAGE',
               'DOCKER_ENABLE_CI', 'WEBSITE_HTTPLOGGING_RETENTION_DAYS',
-              'WEBSITE_LOAD_USER_PROFILE', 'WEBSITE_TIME_ZONE',
+              'WEBSITE_LOAD_USER_PROFILE', 'WEBSITE_TIME_ZONE', 'NODE_DEFAULT_VERSION',
           }
           try:
               data = json.load(open(sys.argv[1]))
-          except Exception as exc:  # réponse vide ou non JSON
+          except Exception as exc:
               print(f"réponse illisible : {exc}")
               raise SystemExit(0)
 
+          print(f"{len(data)} variables")
           for key, entry in sorted(data.items()):
               name = entry.get('name', key) if isinstance(entry, dict) else key
               value = entry.get('value') if isinstance(entry, dict) else entry
@@ -104,7 +128,11 @@ jobs:
         run: |
           set -uo pipefail
           BASE="https://jdjp-dtbmafa8exava5aj.scm.switzerlandnorth-01.azurewebsites.net"
-          AUTH="$(cat "$RUNNER_TEMP/kudu_user"):$(cat "$RUNNER_TEMP/kudu_pass")"
+          AUTH="$(cat "$RUNNER_TEMP/kudu_user" 2>/dev/null || echo nav):$(cat "$RUNNER_TEMP/kudu_pass" 2>/dev/null || echo nav)"
+
+          echo "===== /api/settings ====="
+          curl -sS -u "$AUTH" --max-time 30 "$BASE/api/settings" || true
+          echo
 
           python3 - "$RUNNER_TEMP/cmd.json" <<'PY'
           import json, sys
@@ -125,7 +153,4 @@ jobs:
           echo "===== commande dans le conteneur ====="
           curl -sS -u "$AUTH" -H 'Content-Type: application/json' -X POST \
             --max-time 45 -d @"$RUNNER_TEMP/cmd.json" "$BASE/api/command" || true
-          echo
-          echo "===== /api/settings ====="
-          curl -sS -u "$AUTH" --max-time 30 "$BASE/api/settings" || true
           echo
