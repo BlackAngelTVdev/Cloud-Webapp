@@ -9,11 +9,17 @@
 # build/bin/server.js : la commande de démarrage doit rester
 # "node bin/server.js".
 #
-# Prérequis Azure (App Settings) : NODE_ENV=production, HOST=0.0.0.0,
-# PORT=8080, APP_KEY, DB_*, AZURE_* ; et
-#   az webapp config set -g <rg> -n jdjp --startup-file "node bin/server.js"
+# Configuration applicative : elle est fournie par le secret GitHub
+# APP_ENV_FILE, qui contient le fichier .env (APP_KEY, DB_*, AZURE_*, SMTP_*).
+# AdonisJS charge .env même en production (aucun garde NODE_ENV dans
+# @adonisjs/env), donc aucune App Setting n'est nécessaire, sauf :
 #   az webapp config appsettings set -g <rg> -n jdjp \
 #     --settings SCM_DO_BUILD_DURING_DEPLOYMENT=false WEBSITES_PORT=8080
+# et, si la commande de démarrage n'est pas déjà bonne :
+#   az webapp config set -g <rg> -n jdjp --startup-file "node bin/server.js"
+#
+# NODE_ENV=production / PORT=8080 / HOST=0.0.0.0 sont forcés par le workflow
+# (valeurs attendues par App Service Linux), le reste vient du secret.
 
 name: Build and deploy Node.js app to Azure Web App - jdjp
 
@@ -57,6 +63,32 @@ jobs:
 
       - name: Install production dependencies in build/
         run: cd build && npm ci --omit=dev --prefer-offline --no-audit --no-fund
+
+      # Écrit build/.env à partir du secret APP_ENV_FILE. Le fichier reste
+      # hors du dépôt (build/ et .env sont gitignored) et n'existe que dans
+      # l'artefact déployé. NODE_ENV/PORT/HOST sont imposés pour App Service.
+      - name: Create .env for App Service
+        shell: bash
+        env:
+          ENV_CONTENT: ${{ secrets.APP_ENV_FILE }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ENV_CONTENT:-}" ]; then
+            echo "::error::Le secret APP_ENV_FILE est vide : l'application ne pourra pas démarrer (APP_KEY, DB_* manquants)."
+            exit 1
+          fi
+          # tr : neutralise d'éventuels retours chariot (copier/coller Windows).
+          printf '%s\n' "$ENV_CONTENT" \
+            | tr -d '\r' \
+            | grep -v -E '^(NODE_ENV|PORT|HOST)[[:space:]]*=' \
+            > build/.env || true
+          printf 'NODE_ENV=production\nPORT=8080\nHOST=0.0.0.0\n' >> build/.env
+          # Vérifie que le fichier n'est pas vide et ne fuit pas dans le log.
+          echo "build/.env : $(wc -l < build/.env) lignes"
+          grep -q '^APP_KEY=' build/.env || {
+            echo "::error::APP_KEY absent du secret APP_ENV_FILE."
+            exit 1
+          }
 
       - name: Package deployment artifact
         shell: bash
