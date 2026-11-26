@@ -1,6 +1,6 @@
-name: Build, Release and Deploy (Azure App Service)
+name: Build and Release
 
-# Déclenché sur push main (release si la version change) et manuellement (redéploiement à la demande).
+# Déclenché sur push main (release si la version change) et manuellement.
 on:
   push:
     branches:
@@ -8,31 +8,15 @@ on:
   workflow_dispatch:
 
 # ---------------------------------------------------------------------------
-# Prérequis côté GitHub (Settings > Secrets and variables > Actions)
-#   - Secret  AZURE_WEBAPP_PUBLISH_PROFILE : contenu du fichier de publication
-#                                            (Portail Azure > App Service > Vue d'ensemble
-#                                             > "Obtenir le profil de publication")
-#   - Variable AZURE_WEBAPP_NAME : nom de l'App Service (ex: jdjp-api).
-#     Tant que cette variable n'est pas définie, le job de déploiement est
-#     simplement ignoré : main reste vert et seule la release est publiée.
+# Ce workflow ne fait que construire l'application et publier une release
+# GitHub lorsque la version de package.json change.
 #
-# Prérequis côté Azure (une seule fois) :
-#   az webapp config appsettings set -g <rg> -n <app> --settings \
-#     NODE_ENV=production \
-#     HOST=0.0.0.0 \
-#     PORT=8080 \
-#     APP_KEY=<node ace generate:key> \
-#     SESSION_DRIVER=cookie \
-#     DB_TYPE=mysql DB_HOST=... DB_PORT=3306 DB_USER=... DB_PASSWORD=... DB_DATABASE=... \
-#     AZURE_CLIENT_ID=... AZURE_CLIENT_SECRET=... AZURE_TENANT_ID=... \
-#     AZURE_REDIRECT_URI=https://<app>.azurewebsites.net/auth/microsoft/callback \
-#     AZURE_POST_LOGOUT_REDIRECT_URI=https://<app>.azurewebsites.net/choix-login \
-#     SCM_DO_BUILD_DURING_DEPLOYMENT=false
-#   az webapp config set -g <rg> -n <app> --startup-file "node bin/server.js"
-#   az webapp config set -g <rg> -n <app> --always-on true
+# Le déploiement sur Azure App Service est assuré par main_jdjp.yml : c'est
+# le fichier que le Deployment Center d'Azure suit. Garder un seul chemin de
+# déploiement évite deux publications concurrentes sur le même App Service.
 #
-# Le déploiement envoie uniquement le dossier build/ (dépendances de prod
-# incluses) : aucune compilation n'est faite par la plateforme.
+# Artefact de release : build-v<version>.zip (arborescence build/ conservée)
+# et deploy-v<version>.zip (application à la racine, utilisable à la main).
 # ---------------------------------------------------------------------------
 
 permissions:
@@ -145,27 +129,3 @@ jobs:
           files: build-v${{ needs.build.outputs.version }}.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  deploy:
-    needs: build
-    # Ignoré tant que l'App Service n'est pas déclaré dans les variables du dépôt.
-    if: >-
-      vars.AZURE_WEBAPP_NAME != '' &&
-      (needs.build.outputs.version_changed == 'true' || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    environment:
-      name: production
-      url: https://${{ vars.AZURE_WEBAPP_NAME }}.azurewebsites.net
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: build-${{ needs.build.outputs.version }}
-
-      - name: Deploy to Azure App Service
-        uses: azure/webapps-deploy@v3
-        with:
-          app-name: ${{ vars.AZURE_WEBAPP_NAME }}
-          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-          package: deploy-v${{ needs.build.outputs.version }}.zip

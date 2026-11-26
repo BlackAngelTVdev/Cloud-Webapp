@@ -1,0 +1,96 @@
+# Workflow attendu par Azure App Service (Deployment Center > GitHub Actions).
+#
+# Il a été supprimé du dépôt, ce qui laissait Azure bloqué sur
+# "main_jdjp.yml introuvable" et empêchait tout déploiement.
+#
+# Différence importante avec l'ancien fichier généré par le portail : on
+# déploie uniquement le dossier build/ (compilé + dépendances de prod) et
+# non la racine du dépôt. Sur App Service, le point d'entrée est donc bien
+# build/bin/server.js : la commande de démarrage doit rester
+# "node bin/server.js".
+#
+# Prérequis Azure (App Settings) : NODE_ENV=production, HOST=0.0.0.0,
+# PORT=8080, APP_KEY, DB_*, AZURE_* ; et
+#   az webapp config set -g <rg> -n jdjp --startup-file "node bin/server.js"
+#   az webapp config appsettings set -g <rg> -n jdjp \
+#     --settings SCM_DO_BUILD_DURING_DEPLOYMENT=false WEBSITES_PORT=8080
+
+name: Build and deploy Node.js app to Azure Web App - jdjp
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Une seule génération à la fois : évite deux déploiements concurrents.
+# On n'interrompt jamais un déploiement en cours (un zip à moitié appliqué
+# peut laisser l'application dans un état cassé).
+concurrency:
+  group: deploy-jdjp
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js version
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit --no-fund
+
+      - name: Build project
+        run: npm run build
+
+      - name: Install production dependencies in build/
+        run: cd build && npm ci --omit=dev --prefer-offline --no-audit --no-fund
+
+      - name: Package deployment artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          # L'application doit être à la racine du zip pour App Service.
+          (cd build && zip -rq ../app.zip . -x '*.git*')
+
+      - name: Upload artifact for deployment job
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-app
+          path: app.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: production
+      url: https://jdjp-dtbmafa8exava5aj.switzerlandnorth-01.azurewebsites.net
+    steps:
+      - name: Download artifact from build job
+        uses: actions/download-artifact@v4
+        with:
+          name: node-app
+
+      - name: 'Deploy to Azure Web App'
+        id: deploy-to-webapp
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: 'jdjp'
+          slot-name: 'Production'
+          package: app.zip
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_02B4A6BDB148467D881A410EF039991D }}
