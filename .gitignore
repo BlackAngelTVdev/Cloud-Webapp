@@ -25,3 +25,6 @@ yarn-error.log
 # Platform specific
 .DS_Store
 .freebuff
+
+# Profils de publication Azure (contiennent des identifiants de déploiement)
+*.PublishSettings
