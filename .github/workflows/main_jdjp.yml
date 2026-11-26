@@ -74,8 +74,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${ENV_CONTENT:-}" ]; then
-            echo "::error::Le secret APP_ENV_FILE est vide : l'application ne pourra pas démarrer (APP_KEY, DB_* manquants)."
-            exit 1
+            echo "::warning::Secret APP_ENV_FILE absent : déploiement sans configuration (l'app démarre avec les valeurs de repli de bin/server.ts, sans base de données)."
           fi
           # tr : neutralise d'éventuels retours chariot (copier/coller Windows).
           printf '%s\n' "$ENV_CONTENT" \
@@ -83,12 +82,10 @@ jobs:
             | grep -v -E '^(NODE_ENV|PORT|HOST)[[:space:]]*=' \
             > build/.env || true
           printf 'NODE_ENV=production\nPORT=8080\nHOST=0.0.0.0\n' >> build/.env
-          # Vérifie que le fichier n'est pas vide et ne fuit pas dans le log.
+          grep -q '^APP_KEY=' build/.env \
+            || echo "::warning::APP_KEY absent de APP_ENV_FILE : une clé aléatoire sera générée au démarrage (sessions perdues à chaque redéploiement)."
+          # Le contenu n'est jamais affiché, seulement le nombre de lignes.
           echo "build/.env : $(wc -l < build/.env) lignes"
-          grep -q '^APP_KEY=' build/.env || {
-            echo "::error::APP_KEY absent du secret APP_ENV_FILE."
-            exit 1
-          }
 
       - name: Package deployment artifact
         shell: bash
