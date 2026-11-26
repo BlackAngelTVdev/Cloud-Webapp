@@ -1,0 +1,131 @@
+# Workflow de diagnostic TEMPORAIRE.
+#
+# Il utilise le profil de publication déjà stocké en secret pour interroger
+# l'API Kudu de l'App Service : logs du conteneur, variables d'application
+# (valeurs sensibles masquées) et commande exécutée dans le conteneur.
+#
+# À supprimer une fois la cause du 503 identifiée.
+#
+# Se déclenche à son propre ajout/modification, ou manuellement.
+
+name: Diag jdjp
+
+on:
+  push:
+    paths:
+      - '.github/workflows/diag-jdjp.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Extraire les identifiants Kudu du profil de publication
+        env:
+          PROFILE_B64: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_02B4A6BDB148467D881A410EF039991D }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PROFILE_B64:-}" ]; then
+            echo "::error::Le secret du profil de publication est absent."
+            exit 1
+          fi
+          printf '%s' "$PROFILE_B64" | base64 -d > "$RUNNER_TEMP/profile.xml"
+          python3 - "$RUNNER_TEMP" <<'PY'
+          import re, sys, pathlib
+
+          tmp = pathlib.Path(sys.argv[1])
+          xml = (tmp / 'profile.xml').read_text(encoding='utf-8-sig')
+          user = re.search(r'userName="([^"]+)"', xml)
+          password = re.search(r'userPWD="([^"]+)"', xml)
+          if not user or not password:
+              raise SystemExit('userName/userPWD introuvables dans le profil')
+
+          (tmp / 'kudu_user').write_text(user.group(1))
+          (tmp / 'kudu_pass').write_text(password.group(1))
+          print("identifiants Kudu extraits")
+          PY
+          echo "::add-mask::$(cat "$RUNNER_TEMP/kudu_pass")"
+          chmod 600 "$RUNNER_TEMP/kudu_user" "$RUNNER_TEMP/kudu_pass"
+
+      - name: Logs du conteneur
+        run: |
+          set -uo pipefail
+          BASE="https://jdjp-dtbmafa8exava5aj.scm.switzerlandnorth-01.azurewebsites.net"
+          AUTH="$(cat "$RUNNER_TEMP/kudu_user"):$(cat "$RUNNER_TEMP/kudu_pass")"
+
+          echo "===== /api/logs/docker ====="
+          curl -sS -u "$AUTH" --max-time 45 "$BASE/api/logs/docker?tail=200" | tail -n 200 || true
+          echo
+          echo "===== /api/logs/current ====="
+          curl -sS -u "$AUTH" --max-time 30 "$BASE/api/logs/current?tail=120" | tail -n 120 || true
+          echo
+
+      - name: Variables d'application (valeurs sensibles masquées)
+        run: |
+          set -uo pipefail
+          BASE="https://jdjp-dtbmafa8exava5aj.switzerlandnorth-01.azurewebsites.net"
+          AUTH="$(cat "$RUNNER_TEMP/kudu_user"):$(cat "$RUNNER_TEMP/kudu_pass")"
+
+          curl -sS -u "$AUTH" -H 'Content-Type: application/json' -X POST \
+            --max-time 30 -d '{}' "$BASE/api/appsettings/list" > "$RUNNER_TEMP/appsettings.json" || true
+
+          python3 - "$RUNNER_TEMP/appsettings.json" <<'PY' || true
+          import json, sys
+
+          VISIBLE = {
+              'NODE_ENV', 'HOST', 'PORT', 'WEBSITES_PORT',
+              'SCM_DO_BUILD_DURING_DEPLOYMENT', 'WEBSITE_NODE_DEFAULT_VERSION',
+              'WEBSITES_ENABLE_APP_SERVICE_STORAGE', 'WEBSITE_RUN_FROM_PACKAGE',
+              'DOCKER_ENABLE_CI', 'WEBSITE_HTTPLOGGING_RETENTION_DAYS',
+              'WEBSITE_LOAD_USER_PROFILE', 'WEBSITE_TIME_ZONE',
+          }
+          try:
+              data = json.load(open(sys.argv[1]))
+          except Exception as exc:  # réponse vide ou non JSON
+              print(f"réponse illisible : {exc}")
+              raise SystemExit(0)
+
+          for key, entry in sorted(data.items()):
+              name = entry.get('name', key) if isinstance(entry, dict) else key
+              value = entry.get('value') if isinstance(entry, dict) else entry
+              if name not in VISIBLE:
+                  value = '<masqué>' if value else '<vide>'
+              elif value in (None, ''):
+                  value = '<vide>'
+              print(f"{name} = {value}")
+          PY
+          echo
+
+      - name: État du contenu déployé et version de Node dans le conteneur
+        run: |
+          set -uo pipefail
+          BASE="https://jdjp-dtbmafa8exava5aj.scm.switzerlandnorth-01.azurewebsites.net"
+          AUTH="$(cat "$RUNNER_TEMP/kudu_user"):$(cat "$RUNNER_TEMP/kudu_pass")"
+
+          python3 - "$RUNNER_TEMP/cmd.json" <<'PY'
+          import json, sys
+          json.dump(
+              {
+                  'command': (
+                      "node -v; echo '--- pwd ---'; pwd; "
+                      "echo '--- wwwroot ---'; ls -la /home/site/wwwroot | head -30; "
+                      "echo '--- bin ---'; ls -la /home/site/wwwroot/bin 2>&1 | head; "
+                      "echo '--- process ---'; cat /proc/1/cmdline | tr '\\0' ' '; echo"
+                  ),
+                  'dir': '/home/site/wwwroot',
+              },
+              open(sys.argv[1], 'w'),
+          )
+          PY
+
+          echo "===== commande dans le conteneur ====="
+          curl -sS -u "$AUTH" -H 'Content-Type: application/json' -X POST \
+            --max-time 45 -d @"$RUNNER_TEMP/cmd.json" "$BASE/api/command" || true
+          echo
+          echo "===== /api/settings ====="
+          curl -sS -u "$AUTH" --max-time 30 "$BASE/api/settings" || true
+          echo

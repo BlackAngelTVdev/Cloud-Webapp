@@ -27,6 +27,9 @@ on:
   push:
     branches:
       - main
+    # Le workflow de diagnostic ne doit pas redéployer l'application.
+    paths-ignore:
+      - '.github/workflows/diag-jdjp.yml'
   workflow_dispatch:
 
 permissions:
