@@ -1,8 +1,8 @@
 # Workflow de diagnostic TEMPORAIRE.
 #
 # Il utilise le profil de publication déjà stocké en secret pour interroger
-# l'API Kudu de l'App Service : logs du conteneur, variables d'application
-# (valeurs sensibles masquées), version de Node, contenu de wwwroot.
+# l'API Kudu de l'App Service : fichier de log du conteneur, version de Node,
+# contenu de wwwroot.
 #
 # Le rapport est publié sur la branche "diag-output" (et non sur main) pour
 # rester lisible sans droits sur le dépôt et sans déclencher de déploiement.
@@ -45,107 +45,66 @@ jobs:
           log
 
           # --- Identifiants Kudu -------------------------------------------
-          if [ -z "${PROFILE:-}" ]; then
-            log "ERREUR : secret de profil de publication vide"
-          fi
           printf '%s' "${PROFILE:-}" | base64 -d > "$WORK/profile.xml" 2>/dev/null || true
           if ! grep -q '<publishData' "$WORK/profile.xml" 2>/dev/null; then
             printf '%s' "${PROFILE:-}" > "$WORK/profile.xml"
           fi
-
-          log "## Profil de publication"
-          log "racine publishData : $(grep -c '<publishData' "$WORK/profile.xml" || true)"
-          grep -o 'publishMethod="[^"]*"' "$WORK/profile.xml" | sort -u | tee -a "$OUT" || true
-          grep -o 'publishUrl="[^"]*"' "$WORK/profile.xml" | sort -u | tee -a "$OUT" || true
-
-          python3 - "$WORK" > "$WORK/creds.txt" 2>&1 <<'PY' || true
+          python3 /dev/stdin "$WORK" <<'PY' || true
           import re, sys, pathlib
-
           tmp = pathlib.Path(sys.argv[1])
           xml = (tmp / 'profile.xml').read_text(encoding='utf-8-sig', errors='replace')
           user = re.search(r'userName="([^"]+)"', xml)
           password = re.search(r'userPWD="([^"]+)"', xml)
-          print('userName trouvé :', bool(user), '| userPWD trouvé :', bool(password))
           if user:
               (tmp / 'kudu_user').write_text(user.group(1))
           if password:
               (tmp / 'kudu_pass').write_text(password.group(1))
           PY
-          cat "$WORK/creds.txt" | tee -a "$OUT"
           if [ -s "$WORK/kudu_pass" ]; then
             echo "::add-mask::$(cat "$WORK/kudu_pass")"
           fi
           AUTH="$(cat "$WORK/kudu_user" 2>/dev/null || echo nav):$(cat "$WORK/kudu_pass" 2>/dev/null || echo nav)"
-          log
 
-          # --- Logs du conteneur -------------------------------------------
-          log "## /api/logs/docker"
-          curl -sS -u "$AUTH" --max-time 45 "$BASE/api/logs/docker?isStreaming=false&tail=200" 2>&1 | tail -n 200 | tee -a "$OUT" || true
-          log
-          log "## /api/logs/current"
-          curl -sS -u "$AUTH" --max-time 30 "$BASE/api/logs/current?tail=120" 2>&1 | tail -n 120 | tee -a "$OUT" || true
-          log
-          log "## /api/deployments/latest"
-          curl -sS -u "$AUTH" --max-time 30 "$BASE/api/deployments/latest" 2>&1 | head -c 2000 | tee -a "$OUT" || true
-          log
-          log
-
-          # --- Variables d'application -------------------------------------
-          log "## Variables d'application"
-          curl -sS -u "$AUTH" -H 'Content-Type: application/json' -X POST \
-            --max-time 30 -d '{}' "$BASE/api/appsettings/list" > "$WORK/appsettings.json" 2>/dev/null || true
-          python3 - "$WORK/appsettings.json" >> "$OUT" 2>&1 <<'PY' || true
+          # --- Liste puis contenu du log du conteneur ----------------------
+          log "## LogFiles"
+          curl -sS -u "$AUTH" --max-time 40 "$BASE/api/vfs/LogFiles/" > "$WORK/files.json" 2>/dev/null || true
+          cat > "$WORK/picklog.py" <<'PY'
           import json, sys
-
-          VISIBLE = {
-              'NODE_ENV', 'HOST', 'PORT', 'WEBSITES_PORT',
-              'SCM_DO_BUILD_DURING_DEPLOYMENT', 'WEBSITE_NODE_DEFAULT_VERSION',
-              'WEBSITES_ENABLE_APP_SERVICE_STORAGE', 'WEBSITE_RUN_FROM_PACKAGE',
-              'DOCKER_ENABLE_CI', 'WEBSITE_HTTPLOGGING_RETENTION_DAYS',
-              'WEBSITE_LOAD_USER_PROFILE', 'WEBSITE_TIME_ZONE', 'NODE_DEFAULT_VERSION',
-          }
           try:
               data = json.load(open(sys.argv[1]))
           except Exception as exc:
-              print(f"réponse illisible : {exc}")
-              raise SystemExit(0)
-
-          print(f"{len(data)} variables")
-          for key, entry in sorted(data.items()):
-              name = entry.get('name', key) if isinstance(entry, dict) else key
-              value = entry.get('value') if isinstance(entry, dict) else entry
-              if name not in VISIBLE:
-                  value = '<masqué>' if value else '<vide>'
-              elif value in (None, ''):
-                  value = '<vide>'
-              print(f"{name} = {value}")
+              print(f"liste illisible : {exc}")
+              data = []
+          for entry in data:
+              print(entry.get('name'), entry.get('size'))
+          names = [e['name'] for e in data if 'docker' in e.get('name', '')]
+          open(sys.argv[2], 'w').write(sorted(names)[-1] if names else '')
           PY
+          python3 "$WORK/picklog.py" "$WORK/files.json" "$WORK/logname" | tee -a "$OUT" || true
           log
 
-          # --- Runtime -----------------------------------------------------
-          log "## /api/settings"
-          curl -sS -u "$AUTH" --max-time 30 "$BASE/api/settings" 2>&1 | tee -a "$OUT" || true
+          LOGNAME="$(cat "$WORK/logname" 2>/dev/null || true)"
+          log "## docker log : ${LOGNAME:-introuvable}"
+          if [ -n "${LOGNAME:-}" ]; then
+            curl -sS -u "$AUTH" --max-time 45 "$BASE/api/vfs/LogFiles/$LOGNAME" 2>&1 | tail -n 300 | tee -a "$OUT" || true
+          fi
           log
 
-          python3 - "$WORK/cmd.json" <<'PY'
-          import json, sys
-          json.dump(
-              {
-                  'command': (
-                      "node -v; echo '--- pwd ---'; pwd; "
-                      "echo '--- wwwroot ---'; ls -la /home/site/wwwroot | head -30; "
-                      "echo '--- bin ---'; ls -la /home/site/wwwroot/bin 2>&1 | head; "
-                      "echo '--- process ---'; cat /proc/1/cmdline | tr '\\0' ' '; echo"
-                  ),
-                  'dir': '/home/site/wwwroot',
-              },
-              open(sys.argv[1], 'w'),
-          )
-          PY
-          log "## Commande dans le conteneur"
-          curl -sS -u "$AUTH" -H 'Content-Type: application/json' -X POST \
-            --max-time 45 -d @"$WORK/cmd.json" "$BASE/api/command" 2>&1 | tee -a "$OUT" || true
-          log
+          # --- Commandes simples (l'API Kudu n'accepte pas de shell) --------
+          run_cmd() {
+            cmd="$1"
+            dir="${2:-/home/site/wwwroot}"
+            printf '{"command":"%s","dir":"%s"}' "$cmd" "$dir" > "$WORK/cmd.json"
+            log "\$ $cmd  (dans $dir)"
+            curl -sS -u "$AUTH" -H 'Content-Type: application/json' -X POST \
+              --max-time 40 -d @"$WORK/cmd.json" "$BASE/api/command" 2>&1 | tee -a "$OUT" || true
+            log
+          }
+
+          run_cmd "node -v"
+          run_cmd "ls -la"
+          run_cmd "ls -la" "/home/site/wwwroot/bin"
+          run_cmd "cat package.json"
 
           echo "rapport : $(wc -l < "$OUT") lignes"
 
