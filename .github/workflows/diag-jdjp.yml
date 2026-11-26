@@ -2,51 +2,63 @@
 #
 # Il utilise le profil de publication déjà stocké en secret pour interroger
 # l'API Kudu de l'App Service : logs du conteneur, variables d'application
-# (valeurs sensibles masquées) et commande exécutée dans le conteneur.
+# (valeurs sensibles masquées), version de Node, contenu de wwwroot.
 #
-# À supprimer une fois la cause du 503 identifiée.
+# Le rapport est publié sur la branche "diag-output" (et non sur main) pour
+# rester lisible sans droits sur le dépôt et sans déclencher de déploiement.
 #
-# Se déclenche à son propre ajout/modification, ou manuellement.
+# À supprimer (avec la branche) une fois la cause du 503 identifiée.
 
 name: Diag jdjp
 
 on:
   push:
+    branches:
+      - main
     paths:
       - '.github/workflows/diag-jdjp.yml'
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   diag:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Extraire les identifiants Kudu du profil de publication
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Collecter les informations
         env:
           PROFILE: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_02B4A6BDB148467D881A410EF039991D }}
         run: |
           set -uo pipefail
           WORK="$RUNNER_TEMP"
+          OUT="$WORK/diag.txt"
+          BASE="https://jdjp-dtbmafa8exava5aj.scm.switzerlandnorth-01.azurewebsites.net"
+          : > "$OUT"
+          log() { echo "$@" | tee -a "$OUT"; }
+
+          log "# Rapport de diagnostic $(date -u +%FT%TZ)"
+          log
+
+          # --- Identifiants Kudu -------------------------------------------
           if [ -z "${PROFILE:-}" ]; then
-            echo "::error::Le secret du profil de publication est vide."
-            exit 1
+            log "ERREUR : secret de profil de publication vide"
           fi
-
-          # Azure stocke le profil encodé en base64, mais on accepte aussi
-          # le XML brut pour être robuste.
-          printf '%s' "$PROFILE" | base64 -d > "$WORK/profile.xml" 2>/dev/null || true
+          printf '%s' "${PROFILE:-}" | base64 -d > "$WORK/profile.xml" 2>/dev/null || true
           if ! grep -q '<publishData' "$WORK/profile.xml" 2>/dev/null; then
-            printf '%s' "$PROFILE" > "$WORK/profile.xml"
+            printf '%s' "${PROFILE:-}" > "$WORK/profile.xml"
           fi
 
-          echo "racine XML détectée : $(grep -o '<publishData' "$WORK/profile.xml" | head -1 || echo 'aucune')"
-          echo "profils : $(grep -c '<publishProfile' "$WORK/profile.xml" || true)"
-          grep -o 'publishMethod="[^"]*"' "$WORK/profile.xml" | sort -u || true
+          log "## Profil de publication"
+          log "racine publishData : $(grep -c '<publishData' "$WORK/profile.xml" || true)"
+          grep -o 'publishMethod="[^"]*"' "$WORK/profile.xml" | sort -u | tee -a "$OUT" || true
+          grep -o 'publishUrl="[^"]*"' "$WORK/profile.xml" | sort -u | tee -a "$OUT" || true
 
-          python3 - "$WORK" <<'PY'
+          python3 - "$WORK" > "$WORK/creds.txt" 2>&1 <<'PY' || true
           import re, sys, pathlib
 
           tmp = pathlib.Path(sys.argv[1])
@@ -54,49 +66,35 @@ jobs:
           user = re.search(r'userName="([^"]+)"', xml)
           password = re.search(r'userPWD="([^"]+)"', xml)
           print('userName trouvé :', bool(user), '| userPWD trouvé :', bool(password))
-          if not user or not password:
-              raise SystemExit(1)
-          (tmp / 'kudu_user').write_text(user.group(1))
-          (tmp / 'kudu_pass').write_text(password.group(1))
+          if user:
+              (tmp / 'kudu_user').write_text(user.group(1))
+          if password:
+              (tmp / 'kudu_pass').write_text(password.group(1))
           PY
-          status=$?
-          echo "extraction status=$status"
-
+          cat "$WORK/creds.txt" | tee -a "$OUT"
           if [ -s "$WORK/kudu_pass" ]; then
             echo "::add-mask::$(cat "$WORK/kudu_pass")"
-            chmod 600 "$WORK/kudu_user" "$WORK/kudu_pass"
-            echo "identifiants Kudu prêts"
-          else
-            echo "::warning::Identifiants Kudu non extraits, les appels suivants vont échouer en 401."
           fi
-          exit 0
+          AUTH="$(cat "$WORK/kudu_user" 2>/dev/null || echo nav):$(cat "$WORK/kudu_pass" 2>/dev/null || echo nav)"
+          log
 
-      - name: Logs du conteneur
-        run: |
-          set -uo pipefail
-          BASE="https://jdjp-dtbmafa8exava5aj.scm.switzerlandnorth-01.azurewebsites.net"
-          AUTH="$(cat "$RUNNER_TEMP/kudu_user" 2>/dev/null || echo nav):$(cat "$RUNNER_TEMP/kudu_pass" 2>/dev/null || echo nav)"
+          # --- Logs du conteneur -------------------------------------------
+          log "## /api/logs/docker"
+          curl -sS -u "$AUTH" --max-time 45 "$BASE/api/logs/docker?isStreaming=false&tail=200" 2>&1 | tail -n 200 | tee -a "$OUT" || true
+          log
+          log "## /api/logs/current"
+          curl -sS -u "$AUTH" --max-time 30 "$BASE/api/logs/current?tail=120" 2>&1 | tail -n 120 | tee -a "$OUT" || true
+          log
+          log "## /api/deployments/latest"
+          curl -sS -u "$AUTH" --max-time 30 "$BASE/api/deployments/latest" 2>&1 | head -c 2000 | tee -a "$OUT" || true
+          log
+          log
 
-          echo "===== /api/logs/docker ====="
-          curl -sS -u "$AUTH" --max-time 45 "$BASE/api/logs/docker?isStreaming=false&tail=200" | tail -n 200 || true
-          echo
-          echo "===== /api/logs/current ====="
-          curl -sS -u "$AUTH" --max-time 30 "$BASE/api/logs/current?tail=120" | tail -n 120 || true
-          echo
-          echo "===== /api/deployments/latest ====="
-          curl -sS -u "$AUTH" --max-time 30 "$BASE/api/deployments/latest" | head -c 2000 || true
-          echo
-
-      - name: Variables d'application (valeurs sensibles masquées)
-        run: |
-          set -uo pipefail
-          BASE="https://jdjp-dtbmafa8exava5aj.switzerlandnorth-01.azurewebsites.net"
-          AUTH="$(cat "$RUNNER_TEMP/kudu_user" 2>/dev/null || echo nav):$(cat "$RUNNER_TEMP/kudu_pass" 2>/dev/null || echo nav)"
-
+          # --- Variables d'application -------------------------------------
+          log "## Variables d'application"
           curl -sS -u "$AUTH" -H 'Content-Type: application/json' -X POST \
-            --max-time 30 -d '{}' "$BASE/api/appsettings/list" > "$RUNNER_TEMP/appsettings.json" || true
-
-          python3 - "$RUNNER_TEMP/appsettings.json" <<'PY' || true
+            --max-time 30 -d '{}' "$BASE/api/appsettings/list" > "$WORK/appsettings.json" 2>/dev/null || true
+          python3 - "$WORK/appsettings.json" >> "$OUT" 2>&1 <<'PY' || true
           import json, sys
 
           VISIBLE = {
@@ -122,19 +120,14 @@ jobs:
                   value = '<vide>'
               print(f"{name} = {value}")
           PY
-          echo
+          log
 
-      - name: État du contenu déployé et version de Node dans le conteneur
-        run: |
-          set -uo pipefail
-          BASE="https://jdjp-dtbmafa8exava5aj.scm.switzerlandnorth-01.azurewebsites.net"
-          AUTH="$(cat "$RUNNER_TEMP/kudu_user" 2>/dev/null || echo nav):$(cat "$RUNNER_TEMP/kudu_pass" 2>/dev/null || echo nav)"
+          # --- Runtime -----------------------------------------------------
+          log "## /api/settings"
+          curl -sS -u "$AUTH" --max-time 30 "$BASE/api/settings" 2>&1 | tee -a "$OUT" || true
+          log
 
-          echo "===== /api/settings ====="
-          curl -sS -u "$AUTH" --max-time 30 "$BASE/api/settings" || true
-          echo
-
-          python3 - "$RUNNER_TEMP/cmd.json" <<'PY'
+          python3 - "$WORK/cmd.json" <<'PY'
           import json, sys
           json.dump(
               {
@@ -149,8 +142,21 @@ jobs:
               open(sys.argv[1], 'w'),
           )
           PY
-
-          echo "===== commande dans le conteneur ====="
+          log "## Commande dans le conteneur"
           curl -sS -u "$AUTH" -H 'Content-Type: application/json' -X POST \
-            --max-time 45 -d @"$RUNNER_TEMP/cmd.json" "$BASE/api/command" || true
-          echo
+            --max-time 45 -d @"$WORK/cmd.json" "$BASE/api/command" 2>&1 | tee -a "$OUT" || true
+          log
+
+          echo "rapport : $(wc -l < "$OUT") lignes"
+
+      - name: Publier le rapport sur la branche diag-output
+        run: |
+          set -euo pipefail
+          mkdir -p diag-output
+          cp "$RUNNER_TEMP/diag.txt" diag-output/latest.txt
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -q -B diag-output
+          git add -f diag-output/latest.txt
+          git commit -q -m "diag: rapport $(date -u +%FT%TZ)"
+          git push -f origin diag-output
